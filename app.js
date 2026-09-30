@@ -8,12 +8,31 @@ const seedJourneys = [
     { name: 'Paris', area: 'Paris, France', lat: 48.8584, lon: 2.2945, x: 43, y: 37, memories: 5, note: 'The rain stopped right as we reached the river.', date: '16 SEP 2025', mood: 'Peaceful', photos: [] },
     { name: 'Lisbon', area: 'Lisbon, Portugal', lat: 38.7223, lon: -9.1393, x: 28, y: 67, memories: 7, note: 'Warm bread, tiled walls, and a view I kept coming back to.', date: '23 SEP 2025', mood: 'Grateful', photos: [] }
   ], chapters: [{ title: 'Before I left', place: 'PARIS · 16 SEP', note: 'The first morning with nowhere I had to be.' }, { title: 'New streets', place: 'LISBON · 23 SEP', note: 'We missed our stop and found the best little café.' }] }
-];
-
-const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem('terra-' + key)) ?? fallback; } catch { return fallback; } };
+];const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem('terra-' + key)) ?? fallback; } catch { return fallback; } };
+const normalizeEmail = value => String(value || '').trim().toLowerCase();
+const legacyUser = read('user', { name: 'Traveler', email: '' });
+const legacyAccountEmail = normalizeEmail(legacyUser.email);
+const accountStorageKey = (email, key) => 'terra-account:' + encodeURIComponent(normalizeEmail(email)) + ':' + key;
+const accountProfiles = read('accounts', {});
+let activeAccountEmail = legacyAccountEmail;
+if (legacyAccountEmail && !accountProfiles[legacyAccountEmail]) {
+  accountProfiles[legacyAccountEmail] = { name: legacyUser.name || 'Traveler', needsPasswordSetup: true };
+  localStorage.setItem('terra-accounts', JSON.stringify(accountProfiles));
+}
+function readAccountData(email, key, fallback) {
+  try { const value = localStorage.getItem(accountStorageKey(email, key)); return value === null ? fallback : JSON.parse(value); }
+  catch { return fallback; }
+}
+if (legacyAccountEmail) {
+  for (const key of ['journeys', 'folders']) {
+    const scopedKey = accountStorageKey(legacyAccountEmail, key), oldKey = 'terra-' + key;
+    if (localStorage.getItem(scopedKey) === null && localStorage.getItem(oldKey) !== null) localStorage.setItem(scopedKey, localStorage.getItem(oldKey));
+    localStorage.removeItem(oldKey);
+  }
+}
 const $ = sel => document.querySelector(sel), $$ = sel => [...document.querySelectorAll(sel)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-let journeys = read('journeys', seedJourneys), folders = read('folders', []), user = read('user', { name: 'Traveler', email: '' });
+let journeys = activeAccountEmail ? readAccountData(activeAccountEmail, 'journeys', []) : [], folders = activeAccountEmail ? readAccountData(activeAccountEmail, 'folders', []) : [], user = legacyUser;
 let jid = journeys[0]?.id, lid = 0, mid = 0, filterFolder = '', cursorColor = read('cursorColor', '#facc15'), cursorShape = read('cursorShape', 'circle'); if (cursorShape === 'dot') cursorShape = 'circle';
 let tripMap = null, markerLayer = null, routeLayer = null, mapPickMode = false, lastSearchAt = 0, searchContext = null, objectUrls = [], journeyView = 'story';
 let baseTileLayer = null, baseTileProvider = 0;
@@ -41,7 +60,25 @@ function setJournalFullscreen(value) {
 const currentTrip = () => journeys.find(j => j.id === jid) || journeys[0];
 const currentPlace = () => currentTrip()?.locations?.[lid];
 const currentMemory = () => currentPlace()?.entries?.[mid];
-function persist() { localStorage.setItem('terra-journeys', JSON.stringify(journeys)); localStorage.setItem('terra-folders', JSON.stringify(folders)); }
+function persist() {
+  if (!activeAccountEmail) return;
+  localStorage.setItem(accountStorageKey(activeAccountEmail, 'journeys'), JSON.stringify(journeys));
+  localStorage.setItem(accountStorageKey(activeAccountEmail, 'folders'), JSON.stringify(folders));
+}
+function saveAccountProfiles() { localStorage.setItem('terra-accounts', JSON.stringify(accountProfiles)); }
+async function passwordHash(password, salt) {
+  if (!crypto.subtle) throw new Error('Secure password checks are unavailable in this browser.');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: Uint8Array.from(atob(salt), char => char.charCodeAt(0)), iterations: 150000, hash: 'SHA-256' }, key, 256);
+  return btoa(String.fromCharCode(...new Uint8Array(bits)));
+}
+async function createPasswordRecord(password) {
+  const salt = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  return { salt, passwordHash: await passwordHash(password, salt) };
+}
+function resetAccountView() {
+  jid = journeys[0]?.id; lid = 0; mid = 0; filterFolder = ''; worldFocus = null; worldScale = 1; worldRotation = 0; worldTilt = 0;
+}
 function notify(text) { const el = document.createElement('div'); el.className = 'toast'; el.textContent = text; document.body.append(el); setTimeout(() => el.remove(), 2800); }
 const placeMenu = document.createElement('div');
 placeMenu.id = 'placeContextMenu'; placeMenu.className = 'place-context-menu hidden'; placeMenu.setAttribute('role', 'menu'); placeMenu.innerHTML = '<button type="button" role="menuitem">⌫ &nbsp; Delete place</button>'; document.body.append(placeMenu);
@@ -165,10 +202,39 @@ function goAuth(mode = 'login') {
 function renderAuth(mode) {
   $('#authTitle').textContent = mode === 'login' ? 'Welcome back' : 'Create your archive';
   $('#authDescription').textContent = mode === 'login' ? 'Step back into the places that made you.' : 'A home for the stories you will make along the way.';
-  $('#authForm').innerHTML = `<label>Your name<input name="name" placeholder="How should we address you?" value="${mode === 'login' && user.name !== 'Traveler' ? esc(user.name) : ''}" required autocomplete="name"></label><label>Email address<input name="email" placeholder="you@example.com" type="email" value="${mode === 'login' ? esc(user.email) : ''}" required autocomplete="email"></label><label>Password<input name="password" placeholder="At least 6 characters" type="password" minlength="6" required autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}"></label><button class="auth-submit">${mode === 'login' ? 'ENTER ARCHIVE' : 'CREATE ARCHIVE'} &nbsp; ↗</button>`;
+  $('#authForm').innerHTML = `${mode === 'signup' ? '<label>Your name<input name="name" placeholder="How should we address you?" required autocomplete="name"></label>' : ''}<label>Email address<input name="email" placeholder="you@example.com" type="email" value="${mode === 'login' ? esc(user.email) : ''}" required autocomplete="email"></label><label>Password<input name="password" placeholder="At least 6 characters" type="password" minlength="6" required autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}"></label><button class="auth-submit">${mode === 'login' ? 'ENTER ARCHIVE' : 'CREATE ARCHIVE'} &nbsp; ↗</button>`;
   $('#authSwitch').innerHTML = `${mode === 'login' ? 'Don’t have an archive yet?' : 'Already have an archive?'} <button id="switchAuth">${mode === 'login' ? 'Create one' : 'Log in'}</button>`;
   $('#switchAuth').onclick = () => renderAuth(mode === 'login' ? 'signup' : 'login');
-  $('#authForm').onsubmit = async e => { e.preventDefault(); const data = Object.fromEntries(new FormData(e.target)); user = { name: data.name.trim() || 'Traveler', email: data.email.trim() }; localStorage.setItem('terra-user', JSON.stringify(user)); $('#auth').classList.add('hidden'); await enterApp(); };
+  $('#authForm').onsubmit = async e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target)), email = normalizeEmail(data.email), password = String(data.password || '');
+    try {
+      if (mode === 'signup') {
+        const hasLegacyArchive = email === legacyAccountEmail && ['journeys', 'folders'].some(key => localStorage.getItem(accountStorageKey(email, key)) !== null);
+        if (accountProfiles[email] || hasLegacyArchive) { notify('An archive already exists for this email. Log in instead.'); return; }
+        const credential = await createPasswordRecord(password);
+        accountProfiles[email] = { name: data.name.trim() || 'Traveler', ...credential };
+        saveAccountProfiles();
+        activeAccountEmail = email; user = { name: accountProfiles[email].name, email };
+        journeys = []; folders = []; resetAccountView(); persist();
+      } else {
+        let profile = accountProfiles[email];
+        if (!profile) { notify('No archive exists for this email. Create one first.'); return; }
+        if (profile.needsPasswordSetup) {
+          const credential = await createPasswordRecord(password);
+          profile = accountProfiles[email] = { name: profile.name || 'Traveler', ...credential };
+          saveAccountProfiles();
+        } else {
+          const submittedHash = await passwordHash(password, profile.salt);
+          if (submittedHash !== profile.passwordHash) { notify('That password does not match this archive.'); return; }
+        }
+        activeAccountEmail = email; user = { name: profile.name || 'Traveler', email };
+        journeys = readAccountData(email, 'journeys', []); folders = readAccountData(email, 'folders', []); resetAccountView();
+      }
+      localStorage.setItem('terra-user', JSON.stringify(user));
+      $('#auth').classList.add('hidden'); await enterApp();
+    } catch (error) { notify(error.message || 'This archive could not be opened.'); }
+  };
 }
 function backLanding() { document.body.classList.remove('archive-mode'); $('#auth').classList.add('hidden'); $('#landing').classList.remove('hidden'); }
 async function enterApp() {
@@ -541,7 +607,7 @@ function openModal(kind, makeNew = false, coordinates = null) {
   else if (kind === 'feeling') { const memory = currentMemory(); title = 'Name this feeling'; intro = 'Use your own words for what this moment felt like.'; fields = `<label>YOUR FEELING<input name="mood" value="${esc(memory?.mood || '')}" placeholder="For example, quietly hopeful" maxlength="80" autofocus></label>`; submit = 'SAVE FEELING'; }
   else if (kind === 'editJourney') { const t = currentTrip(); title = 'Journey details'; intro = 'Edit your story, choose a collection, or add your own cover photograph.'; fields = `<label>JOURNEY NAME<input name="name" value="${esc(t.name)}" required></label><label>DESCRIPTION<textarea name="description">${esc(t.description)}</textarea></label>${collectionOptions(t.folder)}<label>COVER PHOTOGRAPH<input name="cover" type="file" accept="image/*"></label><p class="modal-note">WITHOUT A COVER PHOTO, THE JOURNEY USES ITS PLACE MAP.</p>`; submit = 'SAVE CHANGES'; }
   else if (kind === 'memory') { const old = makeNew ? {} : currentMemory() || {}; title = makeNew ? 'Add a memory' : 'Edit this memory'; intro = 'Keep the little details only you can add.'; fields = `<label>WHAT HAPPENED?<textarea name="note" placeholder="What do you remember about this?">${esc(old.note)}</textarea></label><label>WHO WERE YOU WITH?<input name="with" placeholder="Add a name, if you like" value="${esc(old.with)}"></label><label>HOW DID YOU FEEL?<select name="mood"><option value="">Choose a feeling</option>${['Excited','Peaceful','Curious','Grateful','Surprised','Nostalgic'].map(m => `<option ${old.mood === m ? 'selected' : ''}>${m}</option>`).join('')}</select></label><label>SOMETHING I DON’T WANT TO FORGET<textarea name="extra" placeholder="One line is plenty.">${esc(old.extra)}</textarea></label><label>DATE<input name="date" type="date"></label><label>PHOTOGRAPHS<input name="photos" type="file" accept="image/*" multiple></label><p class="modal-note">YOUR WORDS STAY YOURS. NOTHING WRITES A MEMORY FOR YOU.</p>`; submit = makeNew ? 'SAVE MEMORY' : 'SAVE CHANGES'; }
-  else if (kind === 'account') { title = 'My account'; intro = 'Your profile and private archive stay in this browser.'; fields = `<label>DISPLAY NAME<input name="name" value="${esc(user.name)}" required></label><label>EMAIL ADDRESS<input name="email" type="email" value="${esc(user.email)}" required></label><p class="modal-note">This prototype does not create a cloud account or store your password.</p>`; submit = 'SAVE ACCOUNT'; }
+  else if (kind === 'account') { title = 'My account'; intro = 'Your profile and archive are saved separately in this browser.'; fields = `<label>DISPLAY NAME<input name="name" value="${esc(user.name)}" required></label><label>EMAIL ADDRESS<input name="email" type="email" value="${esc(user.email)}" readonly></label><p class="modal-note">This is a local archive for this browser. Your password is checked here and is not uploaded.</p>`; submit = 'SAVE ACCOUNT'; }
 
   $('#modalContent').innerHTML = `<div class="eyebrow">TERRADIARY · YOUR PRIVATE ARCHIVE</div><h2>${title}</h2><p>${intro}</p><form class="form" id="modalForm">${fields}<button class="dark-button">${submit} &nbsp; ↗</button></form>${kind === 'editJourney' ? '<button class="modal-link delete-trip-action" id="deleteJourney">DELETE THIS JOURNEY</button>' : ''}`;
   backdrop.classList.remove('hidden');
@@ -553,7 +619,7 @@ function openModal(kind, makeNew = false, coordinates = null) {
     $('#pickMap').onclick = () => { mapPickMode = true; closeModal(); showScreen('journey'); setJourneyView('map'); notify('Click the map to choose a place.'); };
   }
   $('#deleteJourney')?.addEventListener('click', deleteCurrentJourney);
-  if (kind === 'account') { const logout = document.createElement('button'); logout.type = 'button'; logout.className = 'modal-link logout'; logout.textContent = 'LOG OUT'; logout.onclick = () => { closeModal(); $('#app').style.display = 'none'; backLanding(); }; $('#modalContent').append(logout); }
+  if (kind === 'account') { const logout = document.createElement('button'); logout.type = 'button'; logout.className = 'modal-link logout'; logout.textContent = 'LOG OUT'; logout.onclick = () => { closeModal(); clearObjectUrls(); $('#app').style.display = 'none'; activeAccountEmail = ''; user = { name: 'Traveler', email: '' }; journeys = []; folders = []; resetAccountView(); backLanding(); }; $('#modalContent').append(logout); }
   $('#modalForm').onsubmit = async e => {
     e.preventDefault(); const form = e.target, data = new FormData(form);
     if (kind === 'journey') { const trip = { id: crypto.randomUUID(), name: data.get('name').trim(), description: data.get('description') || 'A journey in progress.', date: data.get('start') ? new Date(data.get('start')).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }).toUpperCase() : 'JUST BEGUN', folder: data.get('folder') || '', coverKey: '', locations: [], chapters: [] }; journeys.unshift(trip); jid = trip.id; lid = 0; mid = 0; persist(); closeModal(); showScreen('journey'); notify('Journey created. Add your first place to the map.'); }
@@ -563,7 +629,7 @@ function openModal(kind, makeNew = false, coordinates = null) {
     else if (kind === 'editJourney') { const trip = currentTrip(); trip.name = data.get('name').trim(); trip.description = data.get('description'); trip.folder = data.get('folder') || ''; const cover = form.querySelector('[name="cover"]').files[0]; if (cover) { await deleteAssets([trip.coverKey]); trip.coverKey = await putAsset(cover); } persist(); closeModal(); renderJourney(); }
     else if (kind === 'memory') { const place = currentPlace(); let memory = makeNew ? { id: crypto.randomUUID(), title: '', note: '', with: '', extra: '', date: '', mood: '', photoKeys: [] } : currentMemory(); memory.note = data.get('note') || ''; memory.with = data.get('with') || ''; memory.extra = data.get('extra') || ''; memory.mood = data.get('mood') || ''; memory.date = data.get('date') ? new Date(data.get('date')).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase() : memory.date || new Date().toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase(); memory.title = memory.note.split(/[.!?]/)[0] || place.name; const files = [...form.querySelector('[name="photos"]').files]; if (files.length) await savePhotoFiles(files, memory, place); if (makeNew) { place.entries.push(memory); mid = place.entries.length - 1; } place.memories = place.entries.length; persist(); closeModal(); renderMemory(); if (!files.length) notify('Memory saved on this device.'); }
     else if (kind === 'feeling') { const memory = currentMemory(); if (!memory) return; memory.mood = data.get('mood').trim(); (currentTrip().chapters || []).filter(chapter => chapter.memoryId === memory.id).forEach(chapter => { chapter.mood = memory.mood; }); persist(); closeModal(); renderMemory(); notify('Feeling saved on this device.'); }
-    else if (kind === 'account') { user = { ...user, name: data.get('name').trim(), email: data.get('email').trim() }; localStorage.setItem('terra-user', JSON.stringify(user)); closeModal(); renderDashboard(); }
+    else if (kind === 'account') { user = { ...user, name: data.get('name').trim() }; if (accountProfiles[activeAccountEmail]) accountProfiles[activeAccountEmail].name = user.name; saveAccountProfiles(); localStorage.setItem('terra-user', JSON.stringify(user)); closeModal(); renderDashboard(); }
   };
 }
 
