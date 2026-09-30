@@ -8,6 +8,6 @@ If you start it manually, run `python -m http.server 8000 --bind 127.0.0.1` from
 
 ## Local data and photos
 
-Journeys, profile details, and memories are stored in this browser. Uploaded photos and journey covers are stored in IndexedDB on this device and remain after logging out and back in with the same browser profile. Clearing browser site data removes them. This prototype does not sync across devices or provide server-based authentication.
+Each email address has its own local archive in this browser. Creating a new archive starts empty; signing in with an existing email and password opens only that archive. A password verifier is stored locally, but there is no server-side account or authentication, and the archive does not sync across devices. This is an account separation feature for the app UI, not protection against someone who can inspect this browser profile or its storage. Clearing browser site data removes the archives. Uploaded photos and journey covers are stored in IndexedDB on this device.
 
 Place searches go to OpenStreetMap's Nominatim service. Your notes and photos are not sent to the map providers.
